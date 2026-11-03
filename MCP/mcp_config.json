@@ -1,0 +1,17 @@
+{
+  "tools": {
+    "scan_idle_file": {
+      "targetPath": "E:",
+      "idleDays": 30,
+      "exportMdPath": "./out/result.md"
+    },
+    "send_notify": {
+      "webhook": "https://xxx",
+      "timeout": 5
+    },
+    "get_location": {
+      "apiUrl": "http://ip-api.com/json/?lang=zh-CN",
+      "timeout": 8
+    }
+  }
+}
