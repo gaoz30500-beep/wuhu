@@ -12,6 +12,12 @@
     "get_location": {
       "apiUrl": "http://ip-api.com/json/?lang=zh-CN",
       "timeout": 8
+    },
+    "save_memory": {
+      "storePath": "memory/memory.jsonl"
+    },
+    "recall_memory": {
+      "storePath": "memory/memory.jsonl"
     }
   }
 }

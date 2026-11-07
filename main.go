@@ -234,7 +234,7 @@ func main() {
 	}
 
 	// 直接使用已验证有效的 key，忽略环境变量，避免旧环境变量覆盖导致 401
-	apiKey := "xxxxxxx"
+	apiKey := "sk-7d1d7cd9677e48e88764237bc92b62ad"
 
 	// TUI 启动前，先连上自己的 MCP 服务器（子进程跑 --mcp）
 	session, err := connectMCPServer(context.Background())

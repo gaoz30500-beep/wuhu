@@ -19,19 +19,53 @@ func ChatTurn(ctx context.Context, apiKey string, history []openai.ChatCompletio
 	config.BaseURL = "https://api.deepseek.com"
 	client := openai.NewClientWithConfig(config)
 
-	messages := history
+	// ① 规则兜底：用户这句话像"要我记住"，就先落一条记忆（失败不影响对话）
+	if n := len(history); n > 0 && history[n-1].Role == openai.ChatMessageRoleUser {
+		autoRemember(history[n-1].Content)
+	}
+
+	// ② 懒压缩：平时什么都不做，预算到 80% 才压一次；压不下去就硬裁。
+	// 返回的 history 头部最多带一条 system 摘要。
+	base := compactIfNeeded(ctx, client, history)
+
+	// ③ 组装本轮请求：system（长期记忆 + 前文摘要）+ 其余历史
+	summary, rest := extractSummary(base)
+	systemContent := buildSystemPrompt()
+	if summary != "" {
+		systemContent += "\n\n【前文对话摘要】\n" + summary
+	}
+	messages := make([]openai.ChatCompletionMessage, 0, len(rest)+1)
+	messages = append(messages, openai.ChatCompletionMessage{
+		Role:    openai.ChatMessageRoleSystem,
+		Content: systemContent,
+	})
+	messages = append(messages, rest...)
+
+	// keep 返回给调用方（main.go 存回 m.history）的历史：
+	// system 必须摘掉（留着会一轮一轮越滚越长，还和新读的记忆打架），
+	// 但"前文摘要"要按原样挂回头部，下一轮才能接上。
+	keep := func() []openai.ChatCompletionMessage {
+		out := make([]openai.ChatCompletionMessage, 0, len(messages))
+		if summary != "" {
+			out = append(out, openai.ChatCompletionMessage{
+				Role:    openai.ChatMessageRoleSystem,
+				Content: summary,
+			})
+		}
+		return append(out, messages[1:]...)
+	}
 
 	// 会话期间工具列表不变，循环前拉一次即可
 	tools, err := MCPToolsToOpenAI(ctx, session)
 	if err != nil {
-		return "", messages, fmt.Errorf("拉取MCP工具失败: %w", err)
+		return "", keep(), fmt.Errorf("拉取MCP工具失败: %w", err)
 	}
 
 	turns := 0
 	for {
 		turns++
 		if turns > maxTurns {
-			return "", messages, fmt.Errorf("达到最大轮次 %d，已终止循环（疑似死循环）", maxTurns)
+			return "", keep(), fmt.Errorf("达到最大轮次 %d，已终止循环（疑似死循环）", maxTurns)
 		}
 
 		// 请求模型（带上从 MCP 动态拉取的工具声明）
@@ -41,7 +75,7 @@ func ChatTurn(ctx context.Context, apiKey string, history []openai.ChatCompletio
 			Tools:    tools,
 		})
 		if err != nil {
-			return "", messages, fmt.Errorf("LLM请求失败: %w", err)
+			return "", keep(), fmt.Errorf("LLM请求失败: %w", err)
 		}
 
 		msg := resp.Choices[0].Message
@@ -49,7 +83,7 @@ func ChatTurn(ctx context.Context, apiKey string, history []openai.ChatCompletio
 
 		// 没有工具调用 → 普通对话，直接返回
 		if len(msg.ToolCalls) == 0 {
-			return msg.Content, messages, nil
+			return msg.Content, keep(), nil
 		}
 
 		// 有工具调用 → 统一交给 MCP 服务器执行，结果回填给模型
@@ -68,7 +102,7 @@ func ChatTurn(ctx context.Context, apiKey string, history []openai.ChatCompletio
 				Arguments: args,
 			})
 			if err != nil {
-				return "", messages, fmt.Errorf("调用工具 %s 失败: %w", toolCall.Function.Name, err)
+				return "", keep(), fmt.Errorf("调用工具 %s 失败: %w", toolCall.Function.Name, err)
 			}
 
 			messages = append(messages, openai.ChatCompletionMessage{
