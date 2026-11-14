@@ -11,33 +11,22 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// LocationConfig 定位工具的配置（对应 mcp_config.json 里 "get_location" 节点）
+// LocationConfig 对应 mcp_config.json 里 tools.get_location 节点
 type LocationConfig struct {
-	ApiURL  string `json:"apiUrl,omitempty"`  // IP定位接口URL，留空用默认(ip-api.com 中文版)
-	Timeout int64  `json:"timeout,omitempty"` // HTTP超时秒数，默认8
+	ApiURL  string `json:"apiUrl,omitempty"`  // IP 定位接口 URL，留空用默认
+	Timeout int64  `json:"timeout,omitempty"` // HTTP 超时秒数，默认 8
 }
 
-// LocationTool 查看当前所在位置（基于公网IP，城市级精度）
-type LocationTool struct{}
+// LocationIn 本工具没有入参，空结构体生成的 schema 就是 {"type":"object"}
+type LocationIn struct{}
 
-func (l *LocationTool) GetName() string {
-	return "get_location"
-}
-
-func (l *LocationTool) GetDescription() string {
-	return "获取当前设备所在的大致位置（国家/省份/城市/经纬度/运营商），基于公网IP定位，城市级精度，无需系统权限"
-}
-
-func (l *LocationTool) GetSchema() string {
-	// 本工具无需入参，空对象即可
-	return `{
-		"type": "object",
-		"properties": {}
-	}`
-}
-
-func (l *LocationTool) NewConfig() any {
-	return &LocationConfig{}
+// registerLocationTool 注册定位工具
+func registerLocationTool(server *mcp.Server) {
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "get_location",
+		Description: "获取当前设备所在的大致位置（国家/省份/城市/经纬度/运营商），" +
+			"基于公网 IP 定位，城市级精度，无需系统权限。",
+	}, runGetLocation)
 }
 
 // ipApiResp 对应 ip-api.com 的返回结构（lang=zh-CN 时 city/regionName 为中文）
@@ -51,11 +40,12 @@ type ipApiResp struct {
 	Lon        float64 `json:"lon"`
 	Timezone   string  `json:"timezone"`
 	Isp        string  `json:"isp"`   // 运营商
-	Query      string  `json:"query"` // 公网IP
+	Query      string  `json:"query"` // 公网 IP
 }
 
-func (l *LocationTool) Run(ctx context.Context, req *mcp.CallToolRequest, cfg any) (*mcp.CallToolResult, error) {
-	conf := cfg.(*LocationConfig)
+func runGetLocation(ctx context.Context, req *mcp.CallToolRequest, in LocationIn) (*mcp.CallToolResult, any, error) {
+	conf := cfg.Tools.Loc
+
 	apiURL := conf.ApiURL
 	if apiURL == "" {
 		apiURL = "http://ip-api.com/json/?lang=zh-CN"
@@ -65,24 +55,29 @@ func (l *LocationTool) Run(ctx context.Context, req *mcp.CallToolRequest, cfg an
 		timeout = 8
 	}
 
-	httpClient := &http.Client{Timeout: time.Duration(timeout) * time.Second}
-	resp, err := httpClient.Get(apiURL)
+	// 用带 ctx 的请求：client 取消时（stdio 断开、调用超时）这里会一起退出
+	reqHTTP, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("IP定位请求失败: %w", err)
+		return nil, nil, fmt.Errorf("构造定位请求失败: %w", err)
+	}
+	httpClient := &http.Client{Timeout: time.Duration(timeout) * time.Second}
+	resp, err := httpClient.Do(reqHTTP)
+	if err != nil {
+		return nil, nil, fmt.Errorf("IP 定位请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("读取定位响应失败: %w", err)
+		return nil, nil, fmt.Errorf("读取定位响应失败: %w", err)
 	}
 
 	var data ipApiResp
 	if err := json.Unmarshal(body, &data); err != nil {
-		return nil, fmt.Errorf("解析定位响应失败: %w", err)
+		return nil, nil, fmt.Errorf("解析定位响应失败: %w", err)
 	}
 	if data.Status != "success" {
-		return nil, fmt.Errorf("定位接口返回异常: %s", string(body))
+		return nil, nil, fmt.Errorf("定位接口返回异常: %s", string(body))
 	}
 
 	result := fmt.Sprintf(
@@ -90,16 +85,7 @@ func (l *LocationTool) Run(ctx context.Context, req *mcp.CallToolRequest, cfg an
 		data.Country, data.RegionName, data.City,
 		data.Zip, data.Lat, data.Lon, data.Timezone, data.Isp, data.Query,
 	)
-
-	res := &mcp.CallToolResult{
-		Content: []mcp.Content{
-			&mcp.TextContent{Text: result},
-		},
-	}
-	return res, nil
-}
-
-// init 自注册：框架通过 Register 收集，StartAutoServer 里自动挂载
-func init() {
-	Register(&LocationTool{})
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: result}},
+	}, nil, nil
 }

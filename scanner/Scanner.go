@@ -1,8 +1,8 @@
 package scanner
 
 import (
-	"fmt"
 	"io/fs"
+	"log"
 	"path/filepath"
 	"syscall"
 	"time"
@@ -11,10 +11,10 @@ import (
 // Scanner 扫描器：只负责遍历磁盘、按闲置阈值筛选文件。
 // 通过注入 IdleResolver 策略计算闲置时长，不再自包含业务计算，也不包含任何控制台交互。
 type Scanner struct {
-	TargetPath    string       // 扫描根路径
+	TargetPath    string        // 扫描根路径
 	IdleThreshold time.Duration // 闲置判定阈值
-	Resolver      IdleResolver // 闲置时长计算策略（依赖接口，可替换实现）
-	Results       []Resource   // 扫描结果
+	Resolver      IdleResolver  // 闲置时长计算策略（依赖接口，可替换实现）
+	Results       []Resource    // 扫描结果
 }
 
 // NewScanner 构造扫描器，默认注入按 atime 计算的闲置策略
@@ -32,7 +32,9 @@ func (s *Scanner) Scan() ([]Resource, error) {
 	err := filepath.WalkDir(s.TargetPath, func(path string, d fs.DirEntry, walkErr error) error {
 		// 【第一步】先处理遍历错误：比如权限拒绝，此时d=nil，不能访问d
 		if walkErr != nil {
-			fmt.Printf("跳过目录 %s, 原因: %v\n", path, walkErr)
+			// 必须走 stderr：本包会被 MCP server（stdio 模式）调用，
+			// stdout 是 JSON-RPC 通道，往那里打一行字就会把协议流冲乱
+			log.Printf("跳过目录 %s, 原因: %v", path, walkErr)
 			return nil // 返回nil，继续遍历，不要return walkErr，否则扫描直接终止
 		}
 		// d判空，防止空指针

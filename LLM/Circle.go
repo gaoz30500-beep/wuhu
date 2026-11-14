@@ -115,7 +115,9 @@ func ChatTurn(ctx context.Context, apiKey string, history []openai.ChatCompletio
 	}
 }
 
-// resultToText 把 CallToolResult 的 Content 拼成文本
+// resultToText 把 CallToolResult 的 Content 拼成文本。
+// IsError 的结果会带上标记：服务端按规范把业务失败放进 Content + isError=true，
+// 这样模型能看到"失败了、失败在哪"，而不是当成一段正常输出继续往下编。
 func resultToText(res *mcp.CallToolResult) string {
 	var texts []string
 	for _, c := range res.Content {
@@ -126,7 +128,11 @@ func resultToText(res *mcp.CallToolResult) string {
 	if len(texts) == 0 {
 		return "(工具无返回内容)"
 	}
-	return strings.Join(texts, "\n")
+	s := strings.Join(texts, "\n")
+	if res.IsError {
+		return "【工具执行失败】" + s
+	}
+	return s
 }
 
 // RunAgent 单轮对话入口（需要传入 MCP 会话）
