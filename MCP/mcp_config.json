@@ -18,6 +18,11 @@
     },
     "recall_memory": {
       "storePath": "memory/memory.jsonl"
+    },
+    "run_command": {
+      "workdir": "E:\\laji",
+      "timeout": 30,
+      "logPath": "E:\\laji\\Agent\\comand.log"
     }
   }
 }

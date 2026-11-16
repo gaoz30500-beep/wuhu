@@ -9,6 +9,7 @@ import (
 
 	"agent/MCP"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -29,7 +30,7 @@ const (
 )
 
 // ===== 对话式美化（bubbletea 自带能力）=====
-// tea.WithAltScreen 全屏窗口 / lipgloss 配色边框 / spinner 加载动画 / viewport 对话滚动
+// tea.WithAltScreen 全屏窗口 / tea.WithMouseCellMotion 滚轮 / lipgloss 配色边框 / spinner 加载动画 / viewport 对话滚动
 var (
 	accent = lipgloss.Color("63") // 蓝紫主题色
 	subtl  = lipgloss.Color("241")
@@ -61,6 +62,16 @@ var (
 	errStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
 	hintStyle = lipgloss.NewStyle().Foreground(subtl).Italic(true)
 )
+
+// 滚动相关按键白名单：只把这几类键交给 viewport，
+// 其余按键照常进输入框（否则空格/f/j/k 等会被 viewport 吃掉）。
+func isScrollKey(k string) bool {
+	switch k {
+	case "pgup", "pgdown", "ctrl+u", "ctrl+d", "up", "down":
+		return true
+	}
+	return false
+}
 
 // ===== 对话消息 =====
 type speaker string
@@ -105,12 +116,25 @@ func initialModel(apiKey string, session *mcp.ClientSession) model {
 	sp := spinner.New()
 	sp.Style = lipgloss.NewStyle().Foreground(accent)
 
+	// viewport 键位：默认键位里有 空格/f/u/d/j/k/h/l，会和打字冲突，这里收紧
+	vp := viewport.New(0, 0)
+	km := viewport.DefaultKeyMap()
+	km.PageUp = key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "上翻一页"))
+	km.PageDown = key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdown", "下翻一页"))
+	km.HalfPageUp = key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "上翻半页"))
+	km.HalfPageDown = key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "下翻半页"))
+	km.Up = key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "上移一行"))
+	km.Down = key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "下移一行"))
+	km.Left = key.NewBinding()  // 关掉 h
+	km.Right = key.NewBinding() // 关掉 l
+	vp.KeyMap = km
+
 	// 中性的开场白：不预设扫盘，只是一个可对话的 AI
 	msgs := []chatMsg{
 		{who: spAI, text: "你好，我是 AI 助手。你可以随意问我问题，也可以让我扫描磁盘的闲置文件，比如：扫描 E 盘的闲置文件。"},
 	}
 
-	return model{apiKey: apiKey, session: session, phase: phaseIdle, input: ti, spinner: sp, msgs: msgs}
+	return model{apiKey: apiKey, session: session, phase: phaseIdle, input: ti, spinner: sp, viewport: vp, msgs: msgs}
 }
 
 func (m model) Init() tea.Cmd { return textinput.Blink }
@@ -119,19 +143,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg: // 窗口尺寸变化 → 对话区自适应
 		m.width, m.height = msg.Width, msg.Height
-		m.viewport.Width = msg.Width - 4
+		// boxStyle: 边框左右各 1 + Padding 左右各 2 = 6，宽度必须扣掉，否则右边被裁
+		m.viewport.Width = msg.Width - 6
 		m.viewport.Height = msg.Height - 8
 		m.viewport.SetContent(renderChat(m.msgs))
 		m.viewport.GotoBottom()
 		return m, nil
+
+	case tea.MouseMsg: // 鼠标滚轮翻看历史
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		return m, cmd
 
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "esc": // 任何阶段都能退出
 			return m, tea.Quit
 		}
+		if isScrollKey(msg.String()) { // 翻页 / 上下行 → 滚历史，不再进输入框
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(msg)
+			return m, cmd
+		}
 
 	case chatDoneMsg: // AI 回复完成
+		atBottom := m.viewport.AtBottom() // 用户正在往上看历史时，别把他拽回底部
 		if msg.err != nil {
 			m.msgs = append(m.msgs, chatMsg{who: spAI, text: "出错了：" + errStyle.Render(msg.err.Error())})
 		} else {
@@ -141,7 +177,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.phase = phaseIdle
 		m.input.Focus()
 		m.viewport.SetContent(renderChat(m.msgs))
-		m.viewport.GotoBottom()
+		if atBottom {
+			m.viewport.GotoBottom()
+		}
 		return m, nil
 	}
 
@@ -177,7 +215,7 @@ func (m model) send() (tea.Model, tea.Cmd) {
 	})
 	m.phase = phaseWorking
 	m.viewport.SetContent(renderChat(m.msgs))
-	m.viewport.GotoBottom()
+	m.viewport.GotoBottom() // 自己发的消息，总是跟到底部
 	// 并行：转动画 + 异步调用 deepseek（带 MCP 会话）
 	return m, tea.Batch(m.spinner.Tick, chatCmd(m.apiKey, m.history, m.session))
 }
@@ -211,7 +249,7 @@ func (m model) View() string {
 	if m.phase == phaseWorking {
 		bottom = m.spinner.View() + " AI 正在思考……（涉及工具时会自动调用）"
 	} else {
-		bottom = m.input.View() + "\n" + hintStyle.Render("回车发送；Ctrl+C / Esc 退出")
+		bottom = m.input.View() + "\n" + hintStyle.Render("回车发送 · PgUp/PgDn 或滚轮翻历史 · Ctrl+C 退出")
 	}
 	return title + "\n" + chat + "\n" + bottom
 }
@@ -245,7 +283,8 @@ func main() {
 	defer session.Close()
 
 	// WithAltScreen: 备用屏幕全屏模式，界面占满终端，像一个独立窗口
-	p := tea.NewProgram(initialModel(apiKey, session), tea.WithAltScreen())
+	// WithMouseCellMotion: 开启鼠标事件，滚轮才能滚动对话历史
+	p := tea.NewProgram(initialModel(apiKey, session), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Println("启动失败:", err)
 		os.Exit(1)

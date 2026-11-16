@@ -26,7 +26,8 @@ func StartAutoServer(ctx context.Context) error {
 	registerScanTool(server)
 	registerLocationTool(server)
 	registerMemoryTools(server)
-
+	registerShellInto(server)
+	registerFileTools(server)
 	log.Println("auto server start")
 
 	// 官方 SDK 没有 ServeStdio，用 Run + StdioTransport

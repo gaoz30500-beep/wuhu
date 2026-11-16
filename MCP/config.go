@@ -18,6 +18,7 @@ type Config struct {
 		Loc    LocationConfig `json:"get_location"`
 		Save   MemoryConfig   `json:"save_memory"`
 		Recall MemoryConfig   `json:"recall_memory"`
+		Shell  ShellConfig    `json:"run_command"`
 	} `json:"tools"`
 }
 

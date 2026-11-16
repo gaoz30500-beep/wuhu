@@ -11,7 +11,7 @@ import (
 )
 
 // maxTurns 最大对话轮次：防止 function call 死循环烧掉 API 额度
-const maxTurns = 10
+const maxTurns = 40
 
 // ChatTurn 多轮对话：工具从 MCP 服务器动态拉取，调用统一走 session.CallTool 执行。
 func ChatTurn(ctx context.Context, apiKey string, history []openai.ChatCompletionMessage, session *mcp.ClientSession) (string, []openai.ChatCompletionMessage, error) {
@@ -65,7 +65,24 @@ func ChatTurn(ctx context.Context, apiKey string, history []openai.ChatCompletio
 	for {
 		turns++
 		if turns > maxTurns {
-			return "", keep(), fmt.Errorf("达到最大轮次 %d，已终止循环（疑似死循环）", maxTurns)
+			landMsg := make([]openai.ChatCompletionMessage, len(messages), len(messages)+1)
+			copy(landMsg, messages)
+			landMsg = append(landMsg, openai.ChatCompletionMessage{
+				Role: openai.ChatMessageRoleUser,
+				Content: fmt.Sprintf("已达到本轮工具调用上限 %d 次。不要再调用任何工具，"+
+					"直接基于上面已有的结果回答用户；没做完的部分，说清楚还差什么。", maxTurns),
+			})
+			finalResp, ferr := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+				Model:    "deepseek-flash",
+				Messages: landMsg,
+			})
+			if ferr != nil || len(finalResp.Choices) == 0 {
+				return "", keep(), fmt.Errorf("达到最大轮次 %d，且收尾请求失败: %w", maxTurns, ferr)
+			}
+
+			// 收尾也算一轮对话，同样旁路提炼一次
+			go distill(apiKey, messages)
+			return finalResp.Choices[0].Message.Content, keep(), nil
 		}
 
 		// 请求模型（带上从 MCP 动态拉取的工具声明）
@@ -83,6 +100,9 @@ func ChatTurn(ctx context.Context, apiKey string, history []openai.ChatCompletio
 
 		// 没有工具调用 → 普通对话，直接返回
 		if len(msg.ToolCalls) == 0 {
+			// 旁路提炼：异步把本轮里"值得长期记"的东西沉淀进记忆库，
+			// 不阻塞这次回复（goroutine 挂了也不影响对话）
+			go distill(apiKey, messages)
 			return msg.Content, keep(), nil
 		}
 
@@ -101,14 +121,17 @@ func ChatTurn(ctx context.Context, apiKey string, history []openai.ChatCompletio
 				Name:      toolCall.Function.Name,
 				Arguments: args,
 			})
+			var toolContent string
 			if err != nil {
-				return "", keep(), fmt.Errorf("调用工具 %s 失败: %w", toolCall.Function.Name, err)
+				toolContent = fmt.Sprintf("【工具调用失败】调用 %s 出错：%v", toolCall.Function.Name, err)
+			} else {
+				toolContent = resultToText(res)
 			}
 
 			messages = append(messages, openai.ChatCompletionMessage{
 				Role:       openai.ChatMessageRoleTool,
 				ToolCallID: toolCall.ID,
-				Content:    resultToText(res),
+				Content:    toolContent,
 			})
 		}
 		// 本轮结束，下一轮让模型基于工具结果继续
