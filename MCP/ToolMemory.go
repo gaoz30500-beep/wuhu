@@ -2,6 +2,7 @@ package MCP
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -45,50 +46,66 @@ func registerMemoryTools(server *mcp.Server) {
 func runSaveMemory(ctx context.Context, req *mcp.CallToolRequest, in SaveMemoryIn) (*mcp.CallToolResult, any, error) {
 	storePath := cfg.Tools.Save.StorePath
 
-	// 写之前先查重：同一条事实不要存十遍
-	if exist, _ := memory.Search(storePath, in.Content, 20); len(exist) > 0 {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{
-				Text: fmt.Sprintf("已存在相似记忆（#%d）：%s", exist[0].ID, exist[0].Content),
-			}},
-		}, nil, nil
+	// 写入统一走 memory.Write：它自己判重、合并、刷权重。
+	// 原来那套"先 Search 整句子串"永远命中不了，等于没查重。
+	res, err := memory.Write(storePath, in.Content, in.Tags, "tool")
+	if err != nil {
+		// 内容为空 / 没有实义词 = 调用方的问题，不是系统故障：
+		// 当正常结果返回，别让用户屏幕上冒一行【工具执行失败】。
+		if errors.Is(err, memory.ErrEmptyContent) || errors.Is(err, memory.ErrNoSemantic) {
+			return textResult("已跳过本次保存：内容为空或没有实义词，不用重试"), nil, nil
+		}
+		return nil, nil, fmt.Errorf("保存记忆失败: %w", err)
 	}
 
-	r, err := memory.Append(storePath, in.Content, in.Tags)
-	if err != nil {
-		return nil, nil, fmt.Errorf("写入记忆失败: %w", err)
+	if res.Action == memory.ActionMerged {
+		return textResult(fmt.Sprintf("已并入已有记忆 #%d（权重 %d，相似度 %.2f）：%s",
+			res.Matched, res.Record.Weight, res.Score, res.Record.Content)), nil, nil
 	}
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{
-			Text: fmt.Sprintf("已记住（#%d）：%s", r.ID, r.Content),
-		}},
-	}, nil, nil
+	return textResult(fmt.Sprintf("已记住 #%d：%s", res.Record.ID, res.Record.Content)), nil, nil
 }
 
 func runRecallMemory(ctx context.Context, req *mcp.CallToolRequest, in RecallMemoryIn) (*mcp.CallToolResult, any, error) {
 	storePath := cfg.Tools.Recall.StorePath
 
-	list, err := memory.Search(storePath, in.Keyword, in.Limit)
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 5
+	}
+	if limit > 10 {
+		limit = 10 // 一次返回太多会吃掉上下文预算，加速触发压缩
+	}
+
+	list, err := memory.LoadAll(storePath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("检索记忆失败: %w", err)
+		return nil, nil, fmt.Errorf("读取记忆库失败: %w", err)
 	}
 	if len(list) == 0 {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "没有检索到相关记忆。"}},
-		}, nil, nil
+		return textResult("记忆库还是空的。"), nil, nil
+	}
+
+	// 用和注入层同一套打分（0.5 相关 + 0.3 新鲜 + 0.2 权重），
+	// 保证"工具查到的"和"提前塞进 prompt 的"是同一个标准。
+	hits := memory.Rank(list, in.Keyword, limit)
+	if len(hits) == 0 {
+		return textResult("没有检索到相关记忆。"), nil, nil
 	}
 
 	var sb strings.Builder
-	for _, r := range list {
-		fmt.Fprintf(&sb, "#%d [%s] %s", r.ID, r.Time, r.Content)
+	for _, r := range hits {
+		fmt.Fprintf(&sb, "- #%d %s", r.ID, r.Content)
 		if r.Tags != "" {
-			fmt.Fprintf(&sb, "（标签：%s）", r.Tags)
+			fmt.Fprintf(&sb, "（%s）", r.Tags)
 		}
 		sb.WriteString("\n")
 	}
+	text := fmt.Sprintf("检索到 %d 条相关记忆：\n%s", len(hits), strings.TrimRight(sb.String(), "\n"))
+	return textResult(text), nil, nil
+}
+
+// textResult 包一层，省得每处都写三行结构体
+func textResult(s string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{
-			Text: fmt.Sprintf("检索到 %d 条相关记忆：\n%s", len(list), sb.String()),
-		}},
-	}, nil, nil
+		Content: []mcp.Content{&mcp.TextContent{Text: s}},
+	}
 }

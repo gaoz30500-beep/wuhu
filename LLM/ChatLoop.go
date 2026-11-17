@@ -20,17 +20,22 @@ func ChatTurn(ctx context.Context, apiKey string, history []openai.ChatCompletio
 	client := openai.NewClientWithConfig(config)
 
 	// ① 规则兜底：用户这句话像"要我记住"，就先落一条记忆（失败不影响对话）
+	// 同时记一条情节：这一轮"用户说了什么"，供下次开会话时接上下文。
+	lastUser := ""
 	if n := len(history); n > 0 && history[n-1].Role == openai.ChatMessageRoleUser {
-		autoRemember(history[n-1].Content)
+		lastUser = strings.TrimSpace(history[n-1].Content)
+		autoRemember(lastUser)
+		recordEpisode("user", lastUser)
 	}
 
 	// ② 懒压缩：平时什么都不做，预算到 80% 才压一次；压不下去就硬裁。
 	// 返回的 history 头部最多带一条 system 摘要。
 	base := compactIfNeeded(ctx, client, history)
 
-	// ③ 组装本轮请求：system（长期记忆 + 前文摘要）+ 其余历史
+	// ③ 组装本轮请求：system（长期记忆三槽 + 前文摘要）+ 其余历史
 	summary, rest := extractSummary(base)
-	systemContent := buildSystemPrompt()
+	// rest 只剩这一条用户消息 = 新会话第一句，这时才附上"上次会话的尾巴"
+	systemContent := buildSystemPrompt(lastUser, len(rest) <= 1)
 	if summary != "" {
 		systemContent += "\n\n【前文对话摘要】\n" + summary
 	}
@@ -81,8 +86,10 @@ func ChatTurn(ctx context.Context, apiKey string, history []openai.ChatCompletio
 			}
 
 			// 收尾也算一轮对话，同样旁路提炼一次
+			answer := finalResp.Choices[0].Message.Content
+			recordEpisode("assistant", answer)
 			go distill(apiKey, messages)
-			return finalResp.Choices[0].Message.Content, keep(), nil
+			return answer, keep(), nil
 		}
 
 		// 请求模型（带上从 MCP 动态拉取的工具声明）
@@ -102,6 +109,7 @@ func ChatTurn(ctx context.Context, apiKey string, history []openai.ChatCompletio
 		if len(msg.ToolCalls) == 0 {
 			// 旁路提炼：异步把本轮里"值得长期记"的东西沉淀进记忆库，
 			// 不阻塞这次回复（goroutine 挂了也不影响对话）
+			recordEpisode("assistant", msg.Content)
 			go distill(apiKey, messages)
 			return msg.Content, keep(), nil
 		}

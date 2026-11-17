@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"agent/MCP"
+	"agent/memory"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -73,6 +74,17 @@ func isScrollKey(k string) bool {
 	return false
 }
 
+// ===== 记忆维护 =====
+const (
+	maintainEveryTurns = 10  // 每 10 轮对话后台维护一次
+	maxFactRecords     = 200 // 事实库上限（超过按权重+新鲜度淘汰）
+	maxEpisodes        = 300 // 情节库上限（只用来接上下文，留最近这些够用）
+)
+
+// neverFail 把三个返回值的维护调用包成无返回值，专门给 go 用。
+// 维护失败一律静默：记忆坏一点不耽误聊天。
+func neverFail(_ memory.CompactStats, _ int, _ error) {}
+
 // ===== 对话消息 =====
 type speaker string
 
@@ -95,6 +107,7 @@ type model struct {
 	viewport viewport.Model                 // 对话滚动区
 	msgs     []chatMsg                      // 界面展示的对话历史
 	history  []openai.ChatCompletionMessage // 传给 LLM 的多轮历史
+	turns    int                            // 本次会话已完成的对话轮数，用来触发记忆维护
 	width    int
 	height   int
 }
@@ -179,6 +192,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.SetContent(renderChat(m.msgs))
 		if atBottom {
 			m.viewport.GotoBottom()
+		}
+
+		// 每 10 轮做一次记忆维护（后台跑，不调模型、不花钱）：
+		// 事实库合并重复 + 淘汰过期，情节库裁到最近 300 条。
+		m.turns++
+		if m.turns%maintainEveryTurns == 0 {
+			go neverFail(memory.Maintain("", "", maxFactRecords, maxEpisodes))
 		}
 		return m, nil
 	}
@@ -273,6 +293,9 @@ func main() {
 
 	// 直接使用已验证有效的 key，忽略环境变量，避免旧环境变量覆盖导致 401
 	apiKey := "sk-7d1d7cd9677e48e88764237bc92b62ad"
+
+	// 启动时后台维护一次：上次退出可能留下重复条目和过长的情节库，先理顺再开聊
+	go neverFail(memory.Maintain("", "", maxFactRecords, maxEpisodes))
 
 	// TUI 启动前，先连上自己的 MCP 服务器（子进程跑 --mcp）
 	session, err := connectMCPServer(context.Background())

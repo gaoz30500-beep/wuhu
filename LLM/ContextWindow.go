@@ -3,11 +3,8 @@ package llm
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"unicode"
-
-	"agent/memory"
 
 	"github.com/sashabaranov/go-openai"
 )
@@ -25,8 +22,6 @@ const (
 	compactTargetRatio = 0.3
 	// 摘要长度上限（token，中文 1 字≈1 token）
 	summaryMaxTokens = 1000
-	// 长期记忆每轮注入条数
-	memoryPromptLimit = 20
 	// 单条消息喂给压缩器时的截断长度（字符），防压缩请求自己爆掉
 	compactMsgChars = 1200
 )
@@ -40,64 +35,6 @@ const compactPrompt = `你是对话压缩器。把下面这段历史对话压成
 2. 删除：寒暄、重复、失败重试、无关的中间过程；
 3. 按时间顺序写，不编造，不写"用户说""助手说"这类冗余主语；
 4. 纯文本，不超过 800 字。`
-
-// ================= 路径 =================
-
-// memoryPath 必须和 mcp_config.json 里两个记忆工具的 storePath 一致
-func memoryPath() string {
-	if p := os.Getenv("AGENT_MEMORY_PATH"); p != "" {
-		return p
-	}
-	return memory.DefaultPath
-}
-
-// ================= system prompt =================
-
-// buildSystemPrompt 每轮重新读一次记忆文件：
-// 上一轮刚写的记忆，这一轮就能用上（不用重启）
-func buildSystemPrompt() string {
-	var sb strings.Builder
-	sb.WriteString("你是一个运行在用户 Windows 电脑上的 AI 助手，可以调用工具操作本机文件、查询网络。回答简洁、准确、口语化。\n\n")
-	sb.WriteString("记忆规则：\n")
-	sb.WriteString("1. 当用户说明稳定的偏好、身份/设备事实，或明确要求你记住某件事时，调用 save_memory 保存（一句话，写清主语）。\n")
-	sb.WriteString("2. 当用户提到“以前”“上次”“我说过”“我的…”这类需要跨对话回忆的内容时，先调用 recall_memory 检索，再回答。\n")
-	sb.WriteString("3. 一次性的临时指令（例如“帮我扫 E 盘”）不要存。\n")
-
-	if facts := memory.Render(memoryPath(), memoryPromptLimit); facts != "" {
-		sb.WriteString("\n【关于用户的长期记忆】（按时间先后，越靠后越新）\n")
-		sb.WriteString(facts)
-	}
-	return sb.String()
-}
-
-// ================= 规则兜底：用户明说要记住 =================
-
-// rememberKeywords 命中这些词，就认为用户在要求"记住"
-var rememberKeywords = []string{"记住", "记一下", "记下", "别忘", "以后都", "以后不要"}
-
-// autoRemember 规则兜底写入。模型判断会漏，这条只是保险，失败不影响对话
-func autoRemember(text string) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return
-	}
-	hit := false
-	for _, kw := range rememberKeywords {
-		if strings.Contains(text, kw) {
-			hit = true
-			break
-		}
-	}
-	if !hit {
-		return
-	}
-
-	// 先查重，避免同一句话存十遍
-	if exist, _ := memory.Search(memoryPath(), text, 5); len(exist) > 0 {
-		return
-	}
-	_, _ = memory.Append(memoryPath(), "用户说过："+text, "自动,规则")
-}
 
 // ================= token 粗估 =================
 // 不引 tokenizer 库：中文按字、英文按 4 字符，够用来判阈值

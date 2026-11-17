@@ -13,16 +13,34 @@ import (
 	"time"
 )
 
-// DefaultPath 默认记忆文件路径（相对项目根目录）。
-// 必须和 mcp_config.json 里 save_memory / recall_memory 的 storePath 保持一致！
-const DefaultPath = "memory/memory.jsonl"
+const (
+	KindFact       = "fact"       // 身份、设备、路径、账号
+	KindPreference = "preference" // 称呼、习惯、喜好
+	KindTask       = "task"       // 未完成的待办
+	KindProject    = "project"    // 项目：路径/结构/状态
+	KindRule       = "rule"       // 已验证的做法/规程
+	KindEnv        = "env"        // 环境限制
+
+	StatusActive  = "active"
+	StatusDone    = "done"
+	StatusDropped = "dropped"
+	DefaultPath   = "memory/memory.jsonl"
+	DefaultWeight = 3
+)
 
 // Record 一条长期记忆
 type Record struct {
-	ID      int64  `json:"id"`
-	Time    string `json:"time"`           // 2026-11-07 21:30
-	Content string `json:"content"`        // 记忆正文，一句话且自包含（写清主语）
-	Tags    string `json:"tags,omitempty"` // 逗号分隔标签，用于检索
+	ID       int64  `json:"id"`
+	Time     string `json:"time"`               // 首次写入 2006-01-02 15:04
+	Updated  string `json:"updated,omitempty"`  // 最后一次合并/修改
+	Kind     string `json:"kind,omitempty"`     // fact/preference/task/project/rule/env  分清类别，方便检索
+	Content  string `json:"content"`            // 记忆正文
+	Tags     string `json:"tags,omitempty"`     // 逗号分隔标签
+	Source   string `json:"source,omitempty"`   // manual/tool/rule/distill 从哪里来的信息
+	Weight   int    `json:"weight,omitempty"`   // 1~5，默认 3 按时间排优先级
+	Status   string `json:"status,omitempty"`   // active/done/dropped 标记完成状态
+	Verified string `json:"verified,omitempty"` // 最后一次验证日期
+	Finger   string `json:"finger,omitempty"`   // 判重指纹
 }
 
 // mu 进程内互斥锁：防止同一进程里两次写入（工具调用 / 规则兜底）同时动文件
@@ -34,6 +52,34 @@ func resolve(path string) string {
 		return DefaultPath
 	}
 	return path
+}
+
+// KindOf 取记录类型；老数据没有 kind 字段，就从 tags 的第一个词推断。
+// 这里用 switch 而不是 map，是为了以后一眼看得懂、改得动。
+func KindOf(r Record) string {
+	if r.Kind != "" {
+		return r.Kind
+	}
+	tags := strings.Split(r.Tags, ",")
+	if len(tags) == 0 {
+		return KindFact
+	}
+	switch strings.TrimSpace(tags[0]) {
+	case "偏好":
+		return KindPreference
+	case "事实":
+		return KindFact
+	case "待办":
+		return KindTask
+	case "项目":
+		return KindProject
+	case "规程":
+		return KindRule
+	case "环境":
+		return KindEnv
+	default:
+		return KindFact
+	}
 }
 
 // LoadAll 读出全部记忆。
@@ -65,6 +111,27 @@ func LoadAll(path string) ([]Record, error) {
 		}
 		list = append(list, r)
 	}
+
+	// 只在内存里补，不写盘；真正落盘发生在 Write/Update 的时候。
+	for i := range list {
+		if list[i].Kind == "" {
+			list[i].Kind = KindOf(list[i])
+		}
+		if list[i].Weight == 0 {
+			list[i].Weight = DefaultWeight
+		}
+		if list[i].Status == "" {
+			list[i].Status = StatusActive
+		}
+		if list[i].Verified == "" && len(list[i].Time) >= 10 {
+			list[i].Verified = list[i].Time[:10]
+		}
+		if list[i].Finger == "" {
+			list[i].Finger = Fingerprint(list[i].Content)
+		}
+
+	}
+
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("读取记忆文件失败: %w", err)
 	}
@@ -91,30 +158,34 @@ func Append(path, content, tags string) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
+	// 取"最大 ID + 1"，不能用最后一条 +1：中间删过条目后 ID 会有空洞，末尾那条可能不是最大的
 	nextID := int64(1)
-	if len(list) > 0 {
-		nextID = list[len(list)-1].ID + 1
+	for _, r := range list {
+		if r.ID >= nextID {
+			nextID = r.ID + 1
+		}
 	}
+
+	cleanTags := strings.TrimSpace(tags)
+	// 先把 tags 包成一条临时 Record 再取 Kind，复用 KindOf，避免另写一份映射
+	kind := KindOf(Record{Tags: cleanTags})
 
 	r := Record{
-		ID:      nextID,
-		Time:    time.Now().Format("2006-01-02 15:04"),
-		Content: content,
-		Tags:    strings.TrimSpace(tags),
+		ID:       nextID,
+		Time:     time.Now().Format("2006-01-02 15:04"),
+		Updated:  time.Now().Format("2006-01-02 15:04"),
+		Kind:     kind,
+		Content:  content,
+		Tags:     cleanTags,
+		Source:   "legacy",
+		Finger:   Fingerprint(content),
+		Weight:   DefaultWeight,
+		Status:   StatusActive,
+		Verified: time.Now().Format("2006-01-02"),
 	}
-	line, err := json.Marshal(r)
-	if err != nil {
-		return Record{}, fmt.Errorf("序列化记忆失败: %w", err)
-	}
-
-	// O_APPEND：只往后加，绝不覆写已有内容
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return Record{}, fmt.Errorf("打开记忆文件写失败: %w", err)
-	}
-	defer f.Close()
-	if _, err := f.WriteString(string(line) + "\n"); err != nil {
-		return Record{}, fmt.Errorf("写入记忆失败: %w", err)
+	// 复用 write.go 里的 appendLine，避免两处各写一份追加逻辑
+	if err := appendLine(path, r); err != nil {
+		return Record{}, err
 	}
 	return r, nil
 }
