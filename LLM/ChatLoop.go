@@ -66,6 +66,9 @@ func ChatTurn(ctx context.Context, apiKey string, history []openai.ChatCompletio
 		return "", keep(), fmt.Errorf("拉取MCP工具失败: %w", err)
 	}
 
+	// 本地技能工具：和 MCP 工具一起交给模型，执行走客户端分流
+	tools = append(tools, openai.Tool{Type: openai.ToolTypeFunction, Function: &LoadSkillTool})
+
 	turns := 0
 	for {
 		turns++
@@ -113,9 +116,23 @@ func ChatTurn(ctx context.Context, apiKey string, history []openai.ChatCompletio
 			go distill(apiKey, messages)
 			return msg.Content, keep(), nil
 		}
-
-		// 有工具调用 → 统一交给 MCP 服务器执行，结果回填给模型
+		// 有工具调用
 		for _, toolCall := range msg.ToolCalls {
+
+			// 本地分流：load_skill 就地读文件，不进 MCP 子进程。
+			// 必须在解析 args 之前 continue，否则白 Unmarshal 一次。
+			if toolCall.Function.Name == LoadSkillTool.Name {
+				content, err := ExecLoadSkill(toolCall.Function.Arguments)
+				if err != nil {
+					content = fmt.Sprintf("【工具调用失败】%s 出错：%v", LoadSkillTool.Name, err)
+				}
+				messages = append(messages, openai.ChatCompletionMessage{
+					Role:       openai.ChatMessageRoleTool,
+					ToolCallID: toolCall.ID,
+					Content:    content,
+				})
+				continue
+			}
 			// 模型返回的参数是 JSON 串，解析成 map
 			var args map[string]any
 			if toolCall.Function.Arguments != "" {

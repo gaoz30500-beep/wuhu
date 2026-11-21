@@ -294,6 +294,10 @@ func main() {
 	// 直接使用已验证有效的 key，忽略环境变量，避免旧环境变量覆盖导致 401
 	apiKey := "sk-7d1d7cd9677e48e88764237bc92b62ad"
 
+	// 技能索引：启动时扫一次 skills 目录，之后每轮 system prompt 直接读内存清单。
+	// 必须在 TUI 之前跑，否则第一轮对话的 prompt 里没有【可用技能】。
+	llm.InitSkills(llm.DefaultSkillRoots())
+
 	// 启动时后台维护一次：上次退出可能留下重复条目和过长的情节库，先理顺再开聊
 	go neverFail(memory.Maintain("", "", maxFactRecords, maxEpisodes))
 

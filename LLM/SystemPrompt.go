@@ -44,6 +44,9 @@ func buildSystemPrompt(query string, withEpisodes bool) string {
 			sb.WriteString(eps)
 		}
 	}
+	if list := RenderSkills(Skills()); list != "" {
+		sb.WriteString(list)
+	}
 	return sb.String()
 }
 
@@ -68,7 +71,6 @@ func autoRemember(text string) {
 	if !hit {
 		return
 	}
-
 	// 判重交给 memory.Write（指纹 + 相似度双闸）。
 	// 原来那句 memory.Search(text) 是整句子串匹配，永远命中不了，等于没查重。
 	_, _ = memory.Write(memoryPath(), "用户说过："+text, "自动,规则", "rule")
