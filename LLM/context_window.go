@@ -6,6 +6,8 @@ import (
 	"strings"
 	"unicode"
 
+	"agent/Env"
+
 	"github.com/sashabaranov/go-openai"
 )
 
@@ -180,7 +182,7 @@ func summarize(ctx context.Context, client *openai.Client, part []openai.ChatCom
 	}
 
 	resp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-		Model: "deepseek-flash",
+		Model: Env.Current().Model,
 		Messages: []openai.ChatCompletionMessage{
 			{Role: openai.ChatMessageRoleSystem, Content: compactPrompt},
 			{Role: openai.ChatMessageRoleUser, Content: sb.String()},

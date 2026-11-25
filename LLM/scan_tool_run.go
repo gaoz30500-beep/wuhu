@@ -1,9 +1,9 @@
 package llm
 
 import (
-	output "agent/OutPut"
-	sortresult "agent/SortResult"
+	"agent/output"
 	"agent/scanner"
+	"agent/sortresult"
 	"encoding/json"
 	"fmt"
 	"time"

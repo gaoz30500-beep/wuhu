@@ -6,6 +6,7 @@ import (
 	"time"
 	"unicode"
 
+	"agent/Env"
 	"agent/memory"
 
 	"github.com/sashabaranov/go-openai"
@@ -54,7 +55,7 @@ const distillPrompt = `你是长期记忆提炼器。下面是用户与助手的
 - 不编造、不复述原话，用陈述句。`
 
 // distill 提炼本轮对话并写入记忆库。调用方必须用 go distill(...) 异步跑。
-func distill(apiKey string, hist []openai.ChatCompletionMessage) {
+func distill(hist []openai.ChatCompletionMessage) {
 	if !distillOn {
 		return
 	}
@@ -71,12 +72,13 @@ func distill(apiKey string, hist []openai.ChatCompletionMessage) {
 	ctx, cancel := context.WithTimeout(context.Background(), distillTimeout)
 	defer cancel()
 
-	config := openai.DefaultConfig(apiKey)
-	config.BaseURL = "https://api.deepseek.com"
+	cfg := Env.Current()
+	config := openai.DefaultConfig(cfg.API_KEY)
+	config.BaseURL = cfg.BASE_URL
 	client := openai.NewClientWithConfig(config)
 
 	resp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-		Model: "deepseek-flash",
+		Model: cfg.Model,
 		Messages: []openai.ChatCompletionMessage{
 			{Role: openai.ChatMessageRoleSystem, Content: distillPrompt},
 			{Role: openai.ChatMessageRoleUser, Content: text},

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	output "agent/OutPut"
+	"agent/output"
 	"agent/scanner"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"

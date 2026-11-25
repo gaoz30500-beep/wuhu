@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"agent/Env"
+
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sashabaranov/go-openai"
 )
@@ -14,9 +16,11 @@ import (
 const maxTurns = 40
 
 // ChatTurn 多轮对话：工具从 MCP 服务器动态拉取，调用统一走 session.CallTool 执行。
-func ChatTurn(ctx context.Context, apiKey string, history []openai.ChatCompletionMessage, session *mcp.ClientSession) (string, []openai.ChatCompletionMessage, error) {
-	config := openai.DefaultConfig(apiKey)
-	config.BaseURL = "https://api.deepseek.com"
+func ChatTurn(ctx context.Context, history []openai.ChatCompletionMessage, session *mcp.ClientSession) (string, []openai.ChatCompletionMessage, error) {
+	// 接入参数统一由 Env 包提供，key / url / model 只有一个来源
+	cfg := Env.Current()
+	config := openai.DefaultConfig(cfg.API_KEY)
+	config.BaseURL = cfg.BASE_URL
 	client := openai.NewClientWithConfig(config)
 
 	// ① 规则兜底：用户这句话像"要我记住"，就先落一条记忆（失败不影响对话）
@@ -81,7 +85,7 @@ func ChatTurn(ctx context.Context, apiKey string, history []openai.ChatCompletio
 					"直接基于上面已有的结果回答用户；没做完的部分，说清楚还差什么。", maxTurns),
 			})
 			finalResp, ferr := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-				Model:    "deepseek-flash",
+				Model:    cfg.Model,
 				Messages: landMsg,
 			})
 			if ferr != nil || len(finalResp.Choices) == 0 {
@@ -91,13 +95,13 @@ func ChatTurn(ctx context.Context, apiKey string, history []openai.ChatCompletio
 			// 收尾也算一轮对话，同样旁路提炼一次
 			answer := finalResp.Choices[0].Message.Content
 			recordEpisode("assistant", answer)
-			go distill(apiKey, messages)
+			go distill(messages)
 			return answer, keep(), nil
 		}
 
 		// 请求模型（带上从 MCP 动态拉取的工具声明）
 		resp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-			Model:    "deepseek-flash",
+			Model:    cfg.Model,
 			Messages: messages,
 			Tools:    tools,
 		})
@@ -113,7 +117,7 @@ func ChatTurn(ctx context.Context, apiKey string, history []openai.ChatCompletio
 			// 旁路提炼：异步把本轮里"值得长期记"的东西沉淀进记忆库，
 			// 不阻塞这次回复（goroutine 挂了也不影响对话）
 			recordEpisode("assistant", msg.Content)
-			go distill(apiKey, messages)
+			go distill(messages)
 			return msg.Content, keep(), nil
 		}
 		// 有工具调用
@@ -184,10 +188,10 @@ func resultToText(res *mcp.CallToolResult) string {
 }
 
 // RunAgent 单轮对话入口（需要传入 MCP 会话）
-func RunAgent(ctx context.Context, apiKey string, userPrompt string, session *mcp.ClientSession) (string, error) {
+func RunAgent(ctx context.Context, userPrompt string, session *mcp.ClientSession) (string, error) {
 	history := []openai.ChatCompletionMessage{
 		{Role: openai.ChatMessageRoleUser, Content: userPrompt},
 	}
-	answer, _, err := ChatTurn(ctx, apiKey, history, session)
+	answer, _, err := ChatTurn(ctx, history, session)
 	return answer, err
 }

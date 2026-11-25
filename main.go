@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
+	"agent/Env"
 	"agent/MCP"
 	"agent/memory"
 
@@ -99,7 +102,6 @@ type chatMsg struct {
 }
 
 type model struct {
-	apiKey   string
 	session  *mcp.ClientSession // MCP 会话，聊天时用它动态调工具
 	phase    phase
 	input    textinput.Model
@@ -119,7 +121,7 @@ type chatDoneMsg struct {
 	err     error
 }
 
-func initialModel(apiKey string, session *mcp.ClientSession) model {
+func initialModel(session *mcp.ClientSession) model {
 	ti := textinput.New()
 	ti.Placeholder = "输入你的问题，回车发送（例如：扫描 E 盘的闲置文件）"
 	ti.Prompt = ""
@@ -147,7 +149,7 @@ func initialModel(apiKey string, session *mcp.ClientSession) model {
 		{who: spAI, text: "你好，我是 AI 助手。你可以随意问我问题，也可以让我扫描磁盘的闲置文件，比如：扫描 E 盘的闲置文件。"},
 	}
 
-	return model{apiKey: apiKey, session: session, phase: phaseIdle, input: ti, spinner: sp, viewport: vp, msgs: msgs}
+	return model{session: session, phase: phaseIdle, input: ti, spinner: sp, viewport: vp, msgs: msgs}
 }
 
 func (m model) Init() tea.Cmd { return textinput.Blink }
@@ -237,13 +239,13 @@ func (m model) send() (tea.Model, tea.Cmd) {
 	m.viewport.SetContent(renderChat(m.msgs))
 	m.viewport.GotoBottom() // 自己发的消息，总是跟到底部
 	// 并行：转动画 + 异步调用 deepseek（带 MCP 会话）
-	return m, tea.Batch(m.spinner.Tick, chatCmd(m.apiKey, m.history, m.session))
+	return m, tea.Batch(m.spinner.Tick, chatCmd(m.history, m.session))
 }
 
 // chatCmd 异步执行：把整段历史交给 deepseek，工具由 MCP 会话动态执行
-func chatCmd(apiKey string, history []openai.ChatCompletionMessage, session *mcp.ClientSession) tea.Cmd {
+func chatCmd(history []openai.ChatCompletionMessage, session *mcp.ClientSession) tea.Cmd {
 	return func() tea.Msg {
-		answer, newHistory, err := llm.ChatTurn(context.Background(), apiKey, history, session)
+		answer, newHistory, err := llm.ChatTurn(context.Background(), history, session)
 		return chatDoneMsg{answer: answer, history: newHistory, err: err}
 	}
 }
@@ -285,15 +287,27 @@ func connectMCPServer(ctx context.Context) (*mcp.ClientSession, error) {
 }
 
 func main() {
+	//agent配置
+	list, err := Env.ReloadAISetting()
+	if err != nil {
+		log.Panic(err)
+	}
+	aicfg, err := llm.CheckConnect(list, 5*time.Second)
+	// 直接使用已验证有效的 key，忽略环境变量，避免旧环境变量覆盖导致 401
+	if err != nil {
+		log.Panic(err)
+	}
+	// 启动即把当前这套配置交给 Env 统一保管：
+	// 之后 LLM 包只认 Env.Current()，key / url / model 不再到处当参数传。
+	if err := Env.Use(aicfg); err != nil {
+		fmt.Fprintln(os.Stderr, "启动失败:", err)
+		os.Exit(1)
+	}
 	// --mcp 分支：本程序作为 MCP 服务器运行
 	if len(os.Args) > 1 && os.Args[1] == "--mcp" {
 		MCP.RunMCPServer()
 		return
 	}
-
-	// 直接使用已验证有效的 key，忽略环境变量，避免旧环境变量覆盖导致 401
-	apiKey := "sk-7d1d7cd9677e48e88764237bc92b62ad"
-
 	// 技能索引：启动时扫一次 skills 目录，之后每轮 system prompt 直接读内存清单。
 	// 必须在 TUI 之前跑，否则第一轮对话的 prompt 里没有【可用技能】。
 	llm.InitSkills(llm.DefaultSkillRoots())
@@ -311,7 +325,7 @@ func main() {
 
 	// WithAltScreen: 备用屏幕全屏模式，界面占满终端，像一个独立窗口
 	// WithMouseCellMotion: 开启鼠标事件，滚轮才能滚动对话历史
-	p := tea.NewProgram(initialModel(apiKey, session), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(initialModel(session), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Println("启动失败:", err)
 		os.Exit(1)
